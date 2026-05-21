@@ -6,10 +6,16 @@
 // 3. Deploy → New deployment → Web app → Execute as: Me → Anyone → Deploy
 // 4. Copy the web app URL into the SEMH Tracker "Apps Script URL" field
 
-const SPREADSHEET_ID = '1GVmV099c3MVX3rzNWICyMVMU5GQxdMpn5hnNAgGoRp4';
-const STUDENTS_GID   = 1402887730;   // The "Students" sheet tab
+const SPREADSHEET_ID = '1w588riFpf2HVkzDM3UvAnEyBhCn6nKw3tskz8sQLyu4';
+const STUDENTS_GID   = 1402887730;   // The sheet tab GID
 
-// ── GET: JSONP endpoint for fetchStudents ────────────────────────────────
+// Column headers written to the sheet
+// Baseline block: "Baseline Date", "Baseline Total", "B01"–"B32"
+// Review block:   "Review Date",   "Review Total",   "% Change", "R01"–"R32"
+function baselineItemCol(id) { return 'B' + String(id).padStart(2, '0'); }
+function reviewItemCol(id)   { return 'R' + String(id).padStart(2, '0'); }
+
+// ── GET: JSONP endpoint (fetchStudents, getReview) ───────────────────────
 function doGet(e) {
   const cb     = e.parameter.callback || 'callback';
   const action = e.parameter.action   || '';
@@ -30,7 +36,7 @@ function doGet(e) {
     .setMimeType(ContentService.MimeType.JAVASCRIPT);
 }
 
-// ── POST: endpoint for saveReview ────────────────────────────────────────
+// ── POST: endpoint (saveReview) ──────────────────────────────────────────
 function doPost(e) {
   let payload;
   try {
@@ -53,27 +59,21 @@ function doPost(e) {
 
 // ── Return the student list ──────────────────────────────────────────────
 function getStudents() {
-  const ss     = SpreadsheetApp.openById(SPREADSHEET_ID);
-  const sheet  = sheetByGid(ss, STUDENTS_GID);
-  const lastR  = sheet.getLastRow();
-  const lastC  = sheet.getLastColumn();
+  const ss    = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const sheet = sheetByGid(ss, STUDENTS_GID);
+  const lastR = sheet.getLastRow();
+  const lastC = sheet.getLastColumn();
   if (lastR < 1 || lastC < 1) return { students: [] };
 
   const all     = sheet.getRange(1, 1, lastR, lastC).getValues();
   const headers = all[0].map(h => String(h).trim().toLowerCase());
 
-  // Detect which columns hold name / form / year — try common UK school labels
-  const nc = colIndex(headers, ['name','student name','student','full name','pupil','pupil name','first name']);
-  const fc = colIndex(headers, ['form','class','form group','tutor group','registration group','group','set']);
-  const yc = colIndex(headers, ['year','year group','yr','year grp','y']);
+  const ni = colIndexOrFallback(headers, ['name','student name','student','full name','pupil','pupil name','first name'], 0);
+  const fi = colIndexOrFallback(headers, ['form','class','form group','tutor group','registration group','group','set'], 1);
+  const yi = colIndexOrFallback(headers, ['year','year group','yr','year grp'], 2);
 
-  // Fallback: col A = name, col B = form, col C = year
-  const ni = nc >= 0 ? nc : 0;
-  const fi = fc >= 0 ? fc : 1;
-  const yi = yc >= 0 ? yc : 2;
-
-  // Skip header row only when at least one header was actually recognised
-  const start = nc >= 0 ? 1 : 0;
+  // Skip header row when at least the name column was recognised
+  const start = (colIndex(headers, ['name','student name','student','full name','pupil','pupil name','first name']) >= 0) ? 1 : 0;
 
   const students = [];
   for (let r = start; r < all.length; r++) {
@@ -89,29 +89,21 @@ function getStudents() {
   return { students };
 }
 
-// ── Read existing SEMH scores for a student ─────────────────────────────
+// ── Read all SEMH data for a student ────────────────────────────────────
 function getReview(name) {
   if (!name) return { error: 'No name provided' };
   const ss    = SpreadsheetApp.openById(SPREADSHEET_ID);
   const sheet = sheetByGid(ss, STUDENTS_GID);
   const lastR = sheet.getLastRow();
-  const lastC = Math.max(sheet.getLastColumn(), 1);
+  if (lastR < 2) return { found: false };
 
-  const headerRow = sheet.getRange(1, 1, 1, lastC).getValues()[0];
-  const headers   = headerRow.map(h => String(h).trim().toLowerCase());
+  const lastC  = sheet.getLastColumn();
+  const headers = sheet.getRange(1, 1, 1, lastC).getValues()[0].map(h => String(h).trim());
+  const headersL = headers.map(h => h.toLowerCase());
 
-  const nc = colIndex(headers, ['name','student name','student','full name','pupil','pupil name','first name']);
-  const ni = nc >= 0 ? nc : 0;
-
-  // Find result columns
-  const basScoreIdx  = colIndex(headers, ['baseline score', 'baseline']);
-  const basDateIdx   = colIndex(headers, ['baseline date']);
-  const currScoreIdx = colIndex(headers, ['current score', 'current', 'review score']);
-  const revDateIdx   = colIndex(headers, ['review date']);
-  const pctIdx       = colIndex(headers, ['% change', 'percent change', 'pct change', 'change']);
+  const ni = colIndexOrFallback(headersL, ['name','student name','student','full name','pupil','pupil name','first name'], 0);
 
   // Find student row
-  if (lastR < 2) return { found: false };
   const nameData = sheet.getRange(2, ni + 1, lastR - 1, 1).getValues();
   let targetRow = -1;
   for (let i = 0; i < nameData.length; i++) {
@@ -123,80 +115,129 @@ function getReview(name) {
   if (targetRow < 0) return { found: false };
 
   const row = sheet.getRange(targetRow, 1, 1, lastC).getValues()[0];
+
+  // Helper to read a named column value
+  function val(label) {
+    const idx = headers.indexOf(label);
+    return idx >= 0 ? row[idx] : null;
+  }
+  function dateVal(label) {
+    const v = val(label);
+    if (!v) return '';
+    try { return Utilities.formatDate(new Date(v), Session.getScriptTimeZone(), 'yyyy-MM-dd'); }
+    catch(e) { return ''; }
+  }
+  function numVal(label) {
+    const v = val(label);
+    return (v !== null && v !== '') ? Number(v) : null;
+  }
+
   const result = { found: true };
-  if (basScoreIdx  >= 0) result.baseline      = row[basScoreIdx];
-  if (basDateIdx   >= 0) result.baselineDate  = row[basDateIdx]  ? Utilities.formatDate(new Date(row[basDateIdx]),  Session.getScriptTimeZone(), 'yyyy-MM-dd') : '';
-  if (currScoreIdx >= 0) result.current       = row[currScoreIdx];
-  if (revDateIdx   >= 0) result.reviewDate    = row[revDateIdx]  ? Utilities.formatDate(new Date(row[revDateIdx]),   Session.getScriptTimeZone(), 'yyyy-MM-dd') : '';
-  if (pctIdx       >= 0) result.percentChange = String(row[pctIdx]).replace('%', '');
+
+  result.baselineDate  = dateVal('Baseline Date');
+  result.baseline      = numVal('Baseline Total');
+  result.reviewDate    = dateVal('Review Date');
+  result.current       = numVal('Review Total');
+  const pctRaw = val('% Change');
+  result.percentChange = pctRaw !== null ? String(pctRaw).replace('%', '') : null;
+
+  // Individual item scores (32 items each)
+  result.baselineItems = [];
+  result.reviewItems   = [];
+  for (let id = 1; id <= 32; id++) {
+    result.baselineItems.push(numVal(baselineItemCol(id)));
+    result.reviewItems.push(numVal(reviewItemCol(id)));
+  }
+
   return result;
 }
 
-// ── Write SEMH scores back to the student row ────────────────────────────
-// Writes to the SAME sheet as the student list.
-// Appends result columns (Baseline Score, Baseline Date, Current Score,
-// Review Date, % Change) if they don't already exist.
+// ── Write SEMH scores back to the student's row ──────────────────────────
+// payload.mode === 'baseline'  → writes Baseline Date, Baseline Total, B01–B32
+// payload.mode === 'review'    → writes Review Date, Review Total, % Change, R01–R32
+// Both modes append any missing column headers automatically.
 function saveReview(p) {
   const ss    = SpreadsheetApp.openById(SPREADSHEET_ID);
   const sheet = sheetByGid(ss, STUDENTS_GID);
   const lastR = sheet.getLastRow();
-  const lastC = Math.max(sheet.getLastColumn(), 1);
+  if (lastR < 2) return { error: 'Sheet has no data rows' };
 
-  const headerRow = sheet.getRange(1, 1, 1, lastC).getValues()[0];
-  const headers   = headerRow.map(h => String(h).trim().toLowerCase());
+  // Read current headers (re-read after any appends)
+  function readHeaders() {
+    const lc = sheet.getLastColumn();
+    return sheet.getRange(1, 1, 1, lc).getValues()[0].map(h => String(h).trim());
+  }
 
-  // Find the name column
-  const nc = colIndex(headers, ['name','student name','student','full name','pupil','pupil name','first name']);
-  const ni = nc >= 0 ? nc : 0;
+  let headers = readHeaders();
+  const headersL = headers.map(h => h.toLowerCase());
+  const ni = colIndexOrFallback(headersL, ['name','student name','student','full name','pupil','pupil name','first name'], 0);
 
-  // Result column definitions: [display label, search aliases]
-  const RESULT_DEFS = [
-    ['Baseline Score', ['baseline score', 'baseline']],
-    ['Baseline Date',  ['baseline date']],
-    ['Current Score',  ['current score', 'current', 'review score']],
-    ['Review Date',    ['review date']],
-    ['% Change',       ['% change', 'percent change', 'pct change', 'change']],
-  ];
-
-  // Ensure each result column exists, collect their 1-based column numbers
-  const resultCols = RESULT_DEFS.map(([label, aliases]) => {
-    let idx = colIndex(headers, aliases);
-    if (idx < 0) {
-      // Append a new column header
-      idx = sheet.getLastColumn(); // 0-based index of new col
-      sheet.getRange(1, idx + 1).setValue(label);
-      headers.push(label.toLowerCase());
-    }
-    return idx + 1; // 1-based
-  });
-
-  // Find the student row (search from row 2 downward)
+  // Find student row
+  const nameData = sheet.getRange(2, ni + 1, lastR - 1, 1).getValues();
   let targetRow = -1;
-  if (lastR >= 2) {
-    const nameData = sheet.getRange(2, ni + 1, lastR - 1, 1).getValues();
-    for (let i = 0; i < nameData.length; i++) {
-      if (String(nameData[i][0]).trim().toLowerCase() === String(p.name || '').toLowerCase()) {
-        targetRow = i + 2; // 1-based row
-        break;
-      }
+  for (let i = 0; i < nameData.length; i++) {
+    if (String(nameData[i][0]).trim().toLowerCase() === String(p.name || '').toLowerCase()) {
+      targetRow = i + 2;
+      break;
+    }
+  }
+  if (targetRow < 0) {
+    return { error: 'Student not found: "' + p.name + '". Check the name matches exactly.' };
+  }
+
+  const mode  = p.mode  || 'review';
+  const items = p.items || [];  // array of { id, label, baseline, current }
+
+  // Build ordered list of [columnHeader, value] pairs
+  const updates = [];
+  if (mode === 'baseline') {
+    updates.push(['Baseline Date',  p.baselineDate || '']);
+    updates.push(['Baseline Total', p.baseline != null ? Number(p.baseline) : '']);
+    for (const it of items) {
+      updates.push([baselineItemCol(it.id), it.baseline != null ? Number(it.baseline) : '']);
+    }
+  } else {
+    updates.push(['Review Date',  p.reviewDate  || '']);
+    updates.push(['Review Total', p.current     != null ? Number(p.current)      : '']);
+    updates.push(['% Change',     p.percentChange != null ? Number(p.percentChange) : '']);
+    for (const it of items) {
+      updates.push([reviewItemCol(it.id), it.current != null ? Number(it.current) : '']);
     }
   }
 
-  if (targetRow < 0) {
-    return { error: 'Student not found in sheet: "' + p.name + '". Check the name matches exactly.' };
+  // Ensure every needed column header exists (append if missing)
+  for (const [colName] of updates) {
+    if (!headers.includes(colName)) {
+      const newCol = sheet.getLastColumn() + 1;
+      sheet.getRange(1, newCol).setValue(colName);
+      headers.push(colName); // keep local copy in sync
+    }
   }
 
-  const values = [
-    p.baseline    != null ? p.baseline    : '',
-    p.baselineDate || '',
-    p.current     != null ? p.current     : '',
-    p.reviewDate  || '',
-    p.percentChange != null ? p.percentChange + '%' : '',
-  ];
+  // Refresh headers after any appends
+  headers = readHeaders();
 
-  for (let i = 0; i < resultCols.length; i++) {
-    sheet.getRange(targetRow, resultCols[i]).setValue(values[i]);
+  // Find the contiguous column range to update, then do a single setValues call
+  const colNums = updates
+    .map(([h]) => headers.indexOf(h) + 1)   // 1-based; 0 → not found
+    .filter(c => c > 0);
+  if (colNums.length === 0) return { ok: true };
+
+  const minCol = Math.min(...colNums);
+  const maxCol = Math.max(...colNums);
+  const width  = maxCol - minCol + 1;
+
+  // Read existing row values for that span
+  const rowBuf = sheet.getRange(targetRow, minCol, 1, width).getValues()[0];
+
+  // Overlay the updates
+  for (const [colName, value] of updates) {
+    const idx = headers.indexOf(colName);
+    if (idx >= 0) rowBuf[idx - (minCol - 1)] = value;
   }
+
+  // Write back in one batch
+  sheet.getRange(targetRow, minCol, 1, width).setValues([rowBuf]);
 
   return { ok: true, row: targetRow };
 }
@@ -206,16 +247,15 @@ function sheetByGid(ss, gid) {
   for (const s of ss.getSheets()) {
     if (s.getSheetId() === gid) return s;
   }
-  return ss.getSheets()[0]; // fallback to first sheet
+  return ss.getSheets()[0];
 }
 
+// Returns the first matching column index (0-based), or -1
 function colIndex(headers, candidates) {
-  // Exact match first
   for (const c of candidates) {
     const i = headers.indexOf(c);
     if (i >= 0) return i;
   }
-  // Partial/substring match
   for (const c of candidates) {
     const i = headers.findIndex(h => h.includes(c) || c.includes(h));
     if (i >= 0) return i;
@@ -223,7 +263,12 @@ function colIndex(headers, candidates) {
   return -1;
 }
 
-// ── JSON response helper ─────────────────────────────────────────────────
+// Like colIndex but returns `fallback` instead of -1
+function colIndexOrFallback(headers, candidates, fallback) {
+  const i = colIndex(headers, candidates);
+  return i >= 0 ? i : fallback;
+}
+
 function respond(obj) {
   return ContentService
     .createTextOutput(JSON.stringify(obj))
