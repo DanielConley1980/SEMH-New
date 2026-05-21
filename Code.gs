@@ -15,6 +15,53 @@ const STUDENTS_GID   = 1402887730;   // The sheet tab GID
 function baselineItemCol(id) { return 'B' + String(id).padStart(2, '0'); }
 function reviewItemCol(id)   { return 'R' + String(id).padStart(2, '0'); }
 
+// ── One-time data cleanup ────────────────────────────────────────────────
+// Run this ONCE from the Apps Script editor (select cleanupStudentData →
+// click Run). It strips "Year " prefixes from the Year column and keeps
+// only the first form entry if a cell contains multiple values.
+function cleanupStudentData() {
+  const ss    = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const sheet = sheetByGid(ss, STUDENTS_GID);
+  const lastR = sheet.getLastRow();
+  const lastC = sheet.getLastColumn();
+  if (lastR < 2) { Logger.log('No data rows found.'); return; }
+
+  const all     = sheet.getRange(1, 1, lastR, lastC).getValues();
+  const headers = all[0].map(h => String(h).trim().toLowerCase());
+
+  const fi = colIndex(headers, ['form','class','form group','tutor group','registration group','group','set']);
+  const yi = colIndex(headers, ['year','year group','yr','year grp']);
+
+  if (fi < 0 && yi < 0) { Logger.log('Could not find Form or Year columns.'); return; }
+
+  let changes = 0;
+  for (let r = 1; r < all.length; r++) {
+    let changed = false;
+
+    if (yi >= 0) {
+      const raw = String(all[r][yi] || '').trim();
+      const cleaned = raw.replace(/^year\s*/i, '');
+      if (cleaned !== raw) {
+        sheet.getRange(r + 1, yi + 1).setValue(cleaned);
+        changed = true;
+      }
+    }
+
+    if (fi >= 0) {
+      const raw = String(all[r][fi] || '').trim();
+      // Take only the first value when cells contain comma/semicolon/space separated forms
+      const first = raw.split(/[,;\/\s]+/)[0].trim();
+      if (first !== raw) {
+        sheet.getRange(r + 1, fi + 1).setValue(first);
+        changed = true;
+      }
+    }
+
+    if (changed) changes++;
+  }
+  Logger.log('Done. ' + changes + ' rows updated.');
+}
+
 // ── GET: JSONP endpoint (fetchStudents, getReview) ───────────────────────
 function doGet(e) {
   const cb     = e.parameter.callback || 'callback';
